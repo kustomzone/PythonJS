@@ -34,6 +34,7 @@
 
 <script src="pythonscript.js"></script>
 <script src="bindings/websocket.py"></script>
+<script src="bindings/blockly.py"></script>
 
 <script type="text/python">
 
@@ -201,22 +202,16 @@ def compile_python():
     <category name="Functions" custom="PROCEDURE"></category>
   </xml>
 
+<script type="text/python">
+from blockly import *
 
-<script type="text/javascript">
+with javascript:
+  def update_ace_editor():
+    editor.setValue( Blockly.Python.workspaceToCode() )
 
-Blockly.inject(
-	document.getElementById('blocklyDiv'),
-	{path: './', toolbox: document.getElementById('toolbox')}
-);
-
-function update_ace_editor() {
-	var code = Blockly.Python.workspaceToCode();
-	editor.setValue( code );
-}
-Blockly.addChangeListener( update_ace_editor );
+initialize_blockly( on_changed_callback=update_ace_editor )
 
 </script>
-
 
 
 <div id="editor">

@@ -1,430 +1,422 @@
-from pythonjs import JS
-from pythonjs import var
-from pythonjs import Array
-from pythonjs import JSObject
-from pythonjs import arguments
+# PythonJS Low Level Runtime
+# by Amirouche Boubekki and Brett Hartshorn - copyright 2013
+# License: "New BSD"
+
+
+__NULL_OBJECT__ = Object.create( null )
+if 'window' in this and 'document' in this:
+	__WEBWORKER__ = False
+	__NODEJS__ = False
+	pythonjs = {}
+elif 'process' in this:
+	## note, we can not test for '"process" in global'
+	## make sure we are really inside NodeJS by letting this fail, and halting the program.
+	__WEBWORKER__ = False
+	__NODEJS__ = True
+else:
+	__NODEJS__ = False
+	__WEBWORKER__ = True
 
 
 def jsrange(num):
-    """Emulates Python's range function"""
-    var(i, r)
-    i = 0
-    r = []
-    while i < num:
-        r.push(i)
-        i = i + 1
-    return r
+	"""Emulates Python's range function"""
+	var(i, r)
+	i = 0
+	r = []
+	while i < num:
+		r.push(i)
+		i = i + 1
+	return r
 
 
-def create_array():
-    """Used to fix a bug/feature of Javascript where new Array(number)
-    created a array with number of undefined elements which is not
-    what we want"""
-    var(array)
-    array = []
-    for i in jsrange(arguments.length):
-        array.push(arguments[i])
-    return array
-
+def __create_array__():
+	"""Used to fix a bug/feature of Javascript where new Array(number)
+	created a array with number of undefined elements which is not
+	what we want"""
+	var(array)
+	array = []
+	for i in jsrange(arguments.length):
+		array.push(arguments[i])
+	return array
 
 def adapt_arguments(handler):
-    """Useful to transform Javascript arguments to Python arguments"""
-    def func():
-        handler(Array.prototype.slice.call(arguments))
-    return func
+	"""Useful to transform Javascript arguments to Python arguments"""
+	def func():
+		handler(Array.prototype.slice.call(arguments))
+	return func
 
 
-def create_class(class_name, parents, attrs, props):
-    """Create a PythonScript class"""
-    if attrs.__metaclass__:
-        var(metaclass)
-        metaclass = attrs.__metaclass__
-        attrs.__metaclass__ = None
-        return metaclass([class_name, parents, attrs])
-    var(klass)
-    klass = JSObject()
-    klass.bases = parents
-    klass.__name__ = class_name
-    klass.__dict__ = attrs
-    klass.__properties__ = props
 
-    def __call__():
-        """Create a PythonScript object"""
-        JS('var object')
-        object = JSObject()
-        object.__class__ = klass
-        object.__dict__ = JSObject()
-        JS('var init')
-        init = get_attribute(object, '__init__')
-        if init:
-            init.apply(None, arguments)
-        return object
-    __call__.pythonscript_function = True
-    klass.__call__ = __call__
-    return klass
+def __get__(object, attribute):
+	"""Retrieve an attribute, method, property, or wrapper function.
 
+	method are actually functions which are converted to methods by
+	prepending their arguments with the current object. Properties are
+	not functions!
 
-def get_attribute(object, attribute):
-    """Retrieve an attribute, method, property, or wrapper function.
+	DOM support:
+		http://stackoverflow.com/questions/14202699/document-createelement-not-working
+		https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/instanceof
 
-    method are actually functions which are converted to methods by
-    prepending their arguments with the current object. Properties are
-    not functions!
+	Direct JavaScript Calls:
+		if an external javascript function is found, and it was not a wrapper that was generated here,
+		check the function for a 'cached_wrapper' attribute, if none is found then generate a new
+		wrapper, cache it on the function, and return the wrapper.
+	"""
+	if object == None:
+		return None
 
-    DOM support:
-        http://stackoverflow.com/questions/14202699/document-createelement-not-working
-        https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/instanceof
+	if attribute == '__call__':
+		if object.pythonscript_function or object.is_wrapper:  ## common case
+			return object
+		elif object.cached_wrapper:  ## rare case
+			return object.cached_wrapper
 
-    Direct JavaScript Calls:
-        if an external javascript function is found, and it was not a wrapper that was generated here,
-        check the function for a 'cached_wrapper' attribute, if none is found then generate a new
-        wrapper, cache it on the function, and return the wrapper.
-    """
-    if attribute == '__call__':
-        if JS("{}.toString.call(object) === '[object Function]'"):
-            if JS("object.pythonscript_function === true"):
-                return object
-            elif JS("object.is_wrapper !== undefined"):
-                return object
-            else:
-                JS("var cached = object.cached_wrapper")
-                if cached:
-                    return cached
-                else:
-                    def wrapper(args,kwargs): return object.apply(None, args)
-                    wrapper.is_wrapper = True
-                    object.cached_wrapper = wrapper
-                    return wrapper
+		elif JS("{}.toString.call(object) === '[object Function]'"):
 
-    var(attr)
-    if attribute == '__contains__':
-        attribute = '__CONTAINS__'  ## we need this ugly hack because we have added javascript Object.prototype.__contains__
+			def wrapper(args,kwargs):  ## TODO double check this on simple functions
+				var(i, arg, keys)
+				if args != None:
+					i = 0
+					while i < args.length:
+						arg = args[i]
+						#if instanceof(arg, Object): ## fails on objects created by Object.create(null)
+						if arg and typeof(arg) == 'object':
+							if arg.jsify:
+								args[i] = arg.jsify()
+						i += 1
 
-    attr = object[attribute]
+				if kwargs != None:
+					keys = __object_keys__(kwargs)
+					if keys.length != 0:
+						args.push( kwargs )
+						i = 0
+						while i < keys.length:
+							arg = kwargs[ keys[i] ]
+							if arg and typeof(arg) == 'object':
+								if arg.jsify:
+									kwargs[ keys[i] ] = arg.jsify()
+							i += 1
 
-    if JS("object instanceof HTMLDocument"):
-        #print 'DYNAMIC wrapping HTMLDocument'
-        if JS("typeof(attr) === 'function'"):
-            def wrapper(args,kwargs): return attr.apply(object, args)
-            wrapper.is_wrapper = True
-            return wrapper
-        else:
-            return attr
-    elif JS("object instanceof HTMLElement"):
-        #print 'DYNAMIC wrapping HTMLElement'
-        if JS("typeof(attr) === 'function'"):
-            def wrapper(args,kwargs): return attr.apply(object, args)
-            wrapper.is_wrapper = True
-            return wrapper
-        else:
-            return attr
-        
-    #if attribute in object:  ## in test not allowed with javascript-string
-    if attr is not None:  ## what about cases where attr is None?
-        if JS("typeof(attr) === 'function' && attr.pythonscript_function === undefined && attr.is_wrapper === undefined"):
-            ## to avoid problems with other generated wrapper funcs not marked with:
-            ## F.pythonscript_function or F.is_wrapper, we could check if object has these props:
-            ## bases, __name__, __dict__, __call__
-            #print 'wrapping something external', object, attribute
+				return object.apply(None, args)
 
-            def wrapper(args,kwargs): return attr.apply(object, args)  ## THIS IS CORRECT
-            #def wrapper(args,kwargs): return attr.call(object, args)  ## this is not correct
-            wrapper.is_wrapper = True
-            return wrapper
-        else:
-            return attr
-
-    var(__class__, __dict__, __get__, bases)
-
-    # Check object.__class__.__dict__ for data descriptors named attr
-    __class__ = object.__class__
-    if __class__:
-        __dict__ = __class__.__dict__
-        attr = __dict__[attribute]
-        if attr:
-            __get__ = get_attribute(attr, '__get__')  ## what are data descriptors?
-            if __get__:
-                return __get__([object, __class__])
-        bases = __class__.bases
-        for i in jsrange(bases.length):
-            var(base, attr)
-            base = bases[i]
-            attr = get_attribute(base, attribute)
-            if attr:
-                __get__ = get_attribute(attr, '__get__')
-                if __get__:
-                    return __get__([object, __class__])
-    # Check object.__dict__ for attr and its bases if it a class
-    # in the case if the descriptor is found return it
-    __dict__ = object.__dict__
-    bases = object.__bases__
-    if __dict__:
-        attr = __dict__[attribute]
-        if attr != None:
-            if bases:
-                __get__ = get_attribute(attr, '__get__')
-                if __get__:
-                    return __get__([None, __class__])
-            return attr
-
-    if bases:
-        for i in jsrange(bases.length):
-            var(base, attr)
-            base = bases[i]
-            attr = get_attribute(base, attribute)
-            if attr:
-                __get__ = get_attribute(attr, '__get__')
-                if __get__:
-                    return __get__([object, __class__])
-
-    if __class__:
-
-        if attribute in __class__.__properties__:  ## @property decorators
-            return __class__.__properties__[ attribute ]( [object] )
-
-        __dict__ = __class__.__dict__
-        attr = __dict__[attribute]
-        #if attr:
-        if attribute in __dict__:
-            if JS("{}.toString.call(attr) === '[object Function]'"):
-                def method():
-                    var(args)
-                    args = arguments
-                    if args.length > 0:
-                        # if it's not an array convert to an array
-                        # this happens when a function/method is feed as callback
-                        # of javascript code
-                        if JS("{}.toString.call(args[0]) != '[object Array]'"):
-                            args[0] = [args[0]]
-                        args[0].splice(0, 0, object)
-                    else:
-                        args = [object]
-                    return attr.apply(None, args)
-                method.is_wrapper = True
-                return method
-            else:
-                return attr
-
-        bases = __class__.bases
-
-        for base in bases:
-            attr = _get_upstream_attribute(base, attribute)
-            if attr:
-                if JS("{}.toString.call(attr) === '[object Function]'"):
-                    def method():
-                        var(args)
-                        args = arguments
-                        if(args.length > 0):
-                            args[0].splice(0, 0, object)
-                        else:
-                            args = [object]
-                        return attr.apply(None, args)
-                    method.is_wrapper = True
-                    return method
-                else:
-                    return attr
-
-        for base in bases:  ## upstream property getters come before __getattr__
-            var( getter )
-            getter = _get_upstream_property(base, attribute)
-            if getter:
-                return getter( [object] )
-
-        if '__getattr__' in __dict__:
-            return __dict__['__getattr__']( [object, attribute])
-
-        for base in bases:
-            var( f )
-            f = _get_upstream_attribute(base, '__getattr__')
-            if f:
-                return f( [object, attribute] )
+			wrapper.is_wrapper = True
+			object.cached_wrapper = wrapper
+			return wrapper
 
 
-    if JS('object instanceof Array'):
-        if attribute == '__getitem__':
-            def wrapper(args,kwargs): return object[ args[0] ]
-            wrapper.is_wrapper = True
-            return wrapper
-        elif attribute == '__setitem__':
-            def wrapper(args,kwargs): object[ args[0] ] = args[1]
-            wrapper.is_wrapper = True
-            return wrapper
+	if Object.hasOwnProperty.call(object, '__getattribute__'):
+		return object.__getattribute__( attribute )
 
-    elif attribute == '__getitem__':  ## this should be a JSObject - or anything else - is this always safe?
-        def wrapper(args,kwargs): return object[ args[0] ]
-        wrapper.is_wrapper = True
-        return wrapper
-    elif attribute == '__setitem__':
-        def wrapper(args,kwargs): object[ args[0] ] = args[1]
-        wrapper.is_wrapper = True
-        return wrapper
 
-    return None  # XXX: raise AttributeError instead
+	#if JS('object instanceof Array'):
+	#	if attribute == '__getitem__':
+	#		def wrapper(args,kwargs): return object.__getitem__( args[0] )
+	#		wrapper.is_wrapper = True
+	#		return wrapper
+	#	elif attribute == '__setitem__':
+	#		def wrapper(args,kwargs): object.__setitem__( args[0], args[1] )
+	#		wrapper.is_wrapper = True
+	#		return wrapper
+
+	var(attr)
+	attr = object[attribute]  ## this could be a javascript object with cached method
+
+
+	if __NODEJS__ is False and __WEBWORKER__ is False:
+		if JS("object instanceof HTMLDocument"):
+			#print 'DYNAMIC wrapping HTMLDocument'
+			if JS("typeof(attr) === 'function'"):
+				def wrapper(args,kwargs): return attr.apply(object, args)
+				wrapper.is_wrapper = True
+				return wrapper
+			else:
+				return attr
+		elif JS("object instanceof HTMLElement"):
+			#print 'DYNAMIC wrapping HTMLElement'
+			if JS("typeof(attr) === 'function'"):
+				def wrapper(args,kwargs): return attr.apply(object, args)
+				wrapper.is_wrapper = True
+				return wrapper
+			else:
+				return attr
+		
+	#if attribute in object:  ## in test not allowed with javascript-string
+	if attr is not None:  ## what about cases where attr is None?
+		if JS("typeof(attr) === 'function'"):
+			if JS("attr.pythonscript_function === undefined && attr.is_wrapper === undefined"):
+				## to avoid problems with other generated wrapper funcs not marked with:
+				## F.pythonscript_function or F.is_wrapper, we could check if object has these props:
+				## bases, __name__, __dict__, __call__
+				#print 'wrapping something external', object, attribute
+
+				#def wrapper(args,kwargs): return attr.apply(object, args)
+
+				def wrapper(args,kwargs):
+					var(i, arg, keys)
+					if args != None:
+						i = 0
+						while i < args.length:
+							arg = args[i]
+							if arg and typeof(arg) == 'object':
+								if arg.jsify:
+									args[i] = arg.jsify()
+							i += 1
+
+					if kwargs != None:
+						#keys = Object.keys(kwargs)
+						keys = __object_keys__(kwargs)
+						if keys.length != 0:
+							args.push( kwargs )
+							i = 0
+							while i < keys.length:
+								arg = kwargs[ keys[i] ]
+								if arg and typeof(arg) == 'object':
+									if arg.jsify:
+										kwargs[ keys[i] ] = arg.jsify()
+								i += 1
+
+					return attr.apply(object, args)
+				wrapper.is_wrapper = True
+				return wrapper
+
+
+			elif attr.is_classmethod:
+
+				def method():
+					var(args)
+					args =  Array.prototype.slice.call(arguments)
+					if (JS('args[0] instanceof Array') and JS("{}.toString.call(args[1]) === '[object Object]'") and args.length == 2):
+						pass
+					else:
+						args = [args, JSObject()]
+					if object.__class__:  ## if classmethod is called from an instance, force class as first argument
+						args[0].splice(0, 0, object.__class__)
+					else:
+						args[0].splice(0, 0, object)
+					return attr.apply(this, args)  ## this is bound so that callback methods can use `this` from the caller
+
+				method.is_wrapper = True
+				object[attribute] = method  ## cache method - we assume that class methods do not change
+				return method
+
+			else:
+				return attr
+
+		else:
+			return attr
+
+	var(__class__, bases)
+
+
+	#attr = object[ attribute ]
+	#if attr != None:
+	#	return attr
+
+
+	# next check for object.__class__
+	__class__ = object.__class__
+	if __class__:  ## at this point we can assume we are dealing with a pythonjs class instance
+
+		if attribute in __class__.__properties__:  ## @property decorators
+			return __class__.__properties__[ attribute ]['get']( [object], JSObject() )
+
+		if attribute in __class__.__unbound_methods__:
+			attr = __class__.__unbound_methods__[ attribute ]
+			if attr.fastdef:
+				def method(args,kwargs):
+					if arguments and arguments[0]:
+						arguments[0].splice(0,0,object)
+						return attr.apply(this, arguments)
+					else:
+						return attr( [object], {} )
+			else:
+				def method():
+					var(args)
+					args =  Array.prototype.slice.call(arguments)
+					if (JS('args[0] instanceof Array') and JS("{}.toString.call(args[1]) === '[object Object]'") and args.length == 2):
+						pass
+					else:
+						args = [args, JSObject()]
+					args[0].splice(0, 0, object)
+					return attr.apply(this, args)  ## this is bound so that callback methods can use `this` from the caller
+
+			method.is_wrapper = True
+			object[attribute] = method  ## cache method - we assume that methods do not change
+			return method
+
+
+		attr = __class__[ attribute ]
+
+		if attribute in __class__:
+			if JS("{}.toString.call(attr) === '[object Function]'"):
+				if attr.is_wrapper:
+					return attr
+				elif attr.fastdef:
+					def method(args,kwargs):
+						if arguments and arguments[0]:
+							arguments[0].splice(0,0,object)
+							return attr.apply(this, arguments)
+						else:
+							return attr( [object], {} )
+				else:
+					def method():
+						var(args)
+						args =  Array.prototype.slice.call(arguments)
+						if (JS('args[0] instanceof Array') and JS("{}.toString.call(args[1]) === '[object Object]'") and args.length == 2):
+							pass
+						else:
+							# in the case where the method was submitted to javascript code
+							# put the arguments in order to be processed by PythonJS
+							args = [args, JSObject()]
+						args[0].splice(0, 0, object)
+						return attr.apply(this, args)
+
+				method.is_wrapper = True
+				object[attribute] = method  ## cache method - we assume that methods do not change
+				return method
+			else:
+				return attr
+
+		bases = __class__.__bases__
+
+		for base in bases:
+			attr = _get_upstream_attribute(base, attribute)
+			if attr:
+				if JS("{}.toString.call(attr) === '[object Function]'"):
+
+					if attr.fastdef:
+						def method(args,kwargs):
+							if arguments and arguments[0]:
+								arguments[0].splice(0,0,object)
+								return attr.apply(this, arguments)
+							else:
+								return attr( [object], {} )
+					else:
+						def method():
+							var(args)
+							args =  Array.prototype.slice.call(arguments)
+							if (JS('args[0] instanceof Array') and JS("{}.toString.call(args[1]) === '[object Object]'") and args.length == 2):
+								pass
+							else:
+								# in the case where the method was submitted to javascript code
+								# put the arguments in order to be processed by PythonJS
+								args = [args, JSObject()]
+
+							args[0].splice(0, 0, object)
+							return attr.apply(this, args)
+
+					method.is_wrapper = True
+					object[attribute] = method  ## cache method - we assume that methods do not change
+					return method
+				else:
+					return attr
+
+		for base in bases:  ## upstream property getters come before __getattr__
+			var( prop )
+			prop = _get_upstream_property(base, attribute)
+			if prop:
+				return prop['get']( [object], JSObject() )
+
+		if '__getattr__' in __class__:
+			return __class__['__getattr__']( [object, attribute], JSObject() )
+
+		for base in bases:
+			var( f )
+			f = _get_upstream_attribute(base, '__getattr__')
+			if f:
+				return f( [object, attribute], JSObject() )
+
+
+	## getting/setting from a normal JavaScript Object ##
+	if attribute == '__getitem__':
+		def wrapper(args,kwargs): return object[ args[0] ]
+		wrapper.is_wrapper = True
+		return wrapper
+	elif attribute == '__setitem__':
+		def wrapper(args,kwargs): object[ args[0] ] = args[1]
+		wrapper.is_wrapper = True
+		return wrapper
+
+	# raise AttributeError instead? or should we allow this? maybe we should be javascript style here and return undefined
+	return None
 
 def _get_upstream_attribute(base, attr):
-    if attr in base.__dict__:
-        return base.__dict__[ attr ]
-    for parent in base.bases:
-        return _get_upstream_attribute(parent, attr)
+	if attr in base:
+		return base[ attr ]
+	for parent in base.__bases__:
+		return _get_upstream_attribute(parent, attr)
 
-def _get_upstream_property(base, attr):
-    if attr in base.__properties__:
-        return base.__properties__[ attr ]
-    for parent in base.bases:
-        return _get_upstream_property(parent, attr)
+def _get_upstream_property(base, attr):  ## no longer required
+	if attr in base.__properties__:
+		return base.__properties__[ attr ]
+	for parent in base.__bases__:
+		return _get_upstream_property(parent, attr)
 
-def set_attribute(object, attribute, value):
-    """Set an attribute on an object by updating its __dict__ property"""
-    var(__dict__, __class__)
-    __class__ = object.__class__
-    if __class__:
-        var(attr, bases)
-        __dict__ = __class__.__dict__
-        attr = __dict__[attribute]
-        if attr != None:
-            __set__ = get_attribute(attr, '__set__')
-            if __set__:
-                __set__([object, value])
-                return
-        bases = __class__.bases
-        for i in jsrange(bases.length):
-            var(base)
-            base = bases[i]
-            attr = get_attribute(base, attribute)
-            if attr:
-                __set__ = get_attribute(attr, '__set__')
-                if __set__:
-                    __set__([object, value])
-                    return
-    __dict__ = object.__dict__
-    if __dict__:
-        __dict__[attribute] = value
-    else:
-        object[attribute] = value
-set_attribute.pythonscript_function = True
+def __set__(object, attribute, value):
+	'''
+	__setattr__ is always called when an attribute is set,
+	unlike __getattr__ that only triggers when an attribute is not found,
+	this asymmetry is in fact part of the Python spec.
+	note there is no __setattribute__
+
+	In normal Python a property setter is not called before __setattr__,
+	this is bad language design because the user has been more explicit
+	in having the property setter.
+
+	In PythonJS, property setters are called instead of __setattr__.
+	'''
+
+	if '__class__' in object and object.__class__.__setters__.indexOf(attribute) != -1:
+		object[attribute] = value
+	elif '__setattr__' in object:
+		object.__setattr__( attribute, value )
+	else:
+		object[attribute] = value
+
 
 
 def get_arguments(signature, args, kwargs):
-    """Based on ``signature`` and ``args``, ``kwargs`` parameters retrieve
-    the actual parameters.
+	"""Based on ``signature`` and ``args``, ``kwargs`` parameters retrieve
+	the actual parameters.
 
-    This will set default keyword arguments and retrieve positional arguments
-    in kwargs if their called as such"""
-    if args is None:
-        args = []
-    if kwargs is None:
-        kwargs = JSObject()
-    out = JSObject()
-    if signature.args.length:
-        argslength = signature.args.length
-    else:
-        argslength = 0
+	This will set default keyword arguments and retrieve positional arguments
+	in kwargs if their called as such"""
 
-    if args.length > signature.args.length:
-        if signature.vararg:
-            pass
-        else:
-            print 'ERROR args:', args, 'kwargs:', kwargs, 'sig:', signature
-            raise TypeError('function called with too many arguments')
+	if args is None:
+		args = []
+	if kwargs is None:
+		kwargs = JSObject()
+	out = JSObject()
 
-    j = 0
-    while j < argslength:
-        arg = JS('signature.args[j]')
-        if kwargs:
-            kwarg = kwargs[arg]
-            #if kwarg is not None:  ## what about cases where the caller wants None
-            if arg in kwargs:       ## TODO, JSObject here should be created with Object.create(null) so that the "in" test will not conflict with internal props like: "constructor", "hasOwnProperty", etc.
-                out[arg] = kwarg
-            elif j < args.length:
-                out[arg] = args[j]
-            elif arg in signature.kwargs:
-                out[arg] = signature.kwargs[arg]
-            else:
-                print 'ERROR args:', args, 'kwargs:', kwargs, 'sig:', signature, j
-                raise TypeError('function called with wrong number of arguments')
-        elif j < args.length:
-            out[arg] = args[j]
-        elif arg in signature.kwargs:
-            out[arg] = signature.kwargs[arg]
-        else:
-            print 'ERROR args:', args, 'kwargs:', kwargs, 'sig:', signature, j
-            raise TypeError('function called with wrong number of arguments')
-        j += 1
+	# if the caller did not specify supplemental positional arguments e.g. *args in the signature
+	# raise an error
+	if args.length > signature.args.length:
+		if signature.vararg:
+			pass
+		else:
+			print 'ERROR args:', args, 'kwargs:', kwargs, 'sig:', signature
+			raise TypeError("Supplemental positional arguments provided but signature doesn't accept them")
 
-    args = args.slice(j)
-    if signature.vararg:
-        out[signature.vararg] = args
-    if signature.varkwarg:
-        out[signature.varkwarg] = kwargs
-    return out
-get_arguments.pythonscript_function = True
+	j = 0
+	while j < signature.args.length:
+		name = signature.args[j]
+		if name in kwargs:
+			# value is provided as a keyword argument
+			out[name] = kwargs[name]
+		elif j < args.length:
+			# value is positional and within the signature length
+			out[name] = args[j]
+		elif name in signature.kwargs:
+			# value is not found before and is in signature.length
+			out[name] = signature.kwargs[name]
+		j += 1
 
-def type(args, kwargs):
-    var(class_name, parents, attrs)
-    class_name = args[0]
-    parents = args[1]
-    attrs = args[2]
-    return create_class(class_name, parents, attrs)
-type.pythonscript_function = True
+	args = args.slice(j)  ## note that if this fails because args is not an array, then a pythonjs function was called from javascript in a bad way.
 
-def getattr(args, kwargs):
-    var(object, attribute)
-    object = args[0]
-    attribute = args[1]
-    return get_attribute(object, attribute)
-getattr.pythonscript_function = True
+	if signature.vararg:
+		out[signature.vararg] = args
+	if signature.varkwarg:
+		out[signature.varkwarg] = kwargs
+	return out
 
-def setattr(args, kwargs):
-    var(object, attribute, value)
-    object = args[0]
-    attribute = args[1]
-    value = args[2]
-    return set_attribute(object, attribute, value)
-setattr.pythonscript_function = True
-
-def issubclass(args, kwargs):
-    var(C, B, base)
-    C = args[0]
-    B = args[1]
-    if C is B:
-        return True
-    for index in jsrange(C.bases.length):
-        base = C.bases[index]
-        if issubclass([base, B], JSObject()):
-            return True
-    return False
-issubclass.pythonscript_function = True
-
-def isinstance(args, kwargs):
-    var(object_class, object, klass)
-    object = args[0]
-    klass = args[1]
-    object_class = object.__class__
-    if object_class is None:
-        return False
-    return issubclass(create_array(object_class, klass))
-isinstance.pythonscript_function = True
-
-# not part of Python, but it's here because it's easier to write
-# in PythonJS
-
-def json_to_pythonscript(json):
-    var(jstype, item, output)
-    jstype = JS('typeof json')
-    if jstype == 'number':
-        return json
-    if jstype == 'string':
-        return json
-    if JS("Object.prototype.toString.call(json) === '[object Array]'"):
-        output = list.__call__([])
-        var(append)
-        for item in json:
-            append = get_attribute(output, 'append')
-            append([json_to_pythonscript(item)])
-        return output
-    # else it's a map
-    output = dict.__call__([])
-    for key in JS('Object.keys(json)'):
-        set = get_attribute(output, 'set')
-        set([key, json_to_pythonscript(json[key])])
-    return output

@@ -14,9 +14,11 @@ class A:
 
 	@property
 	def z(self):
+		print 'using z getter'
 		return self._z
 
 	def __getattr__(self, name):
+		print 'using __getattr__'
 		if name == 'hello':
 			return 100
 		elif name == 'world':
@@ -26,6 +28,7 @@ class A:
 
 
 def test():
+	global a
 	a = A(1,2,3)
 	print('--testing class level attribute')
 	print( a.W )
