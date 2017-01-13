@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-# PythonJS to CoffeeScript Translator
+# PythonJS to Lua Translator
 # by Brett Hartshorn - copyright 2014
 # License: "New BSD"
-import os, sys
+import sys
 import ast
 import pythonjs
 
@@ -28,8 +28,28 @@ def collect_names(node):
 
 
 class LuaGenerator( pythonjs.JSGenerator ):
-	_classes = dict()
-	_class_props = dict()
+
+	def __init__(self, requirejs=False, insert_runtime=False):
+		pythonjs.JSGenerator.__init__(self, requirejs=False, insert_runtime=False)
+		self._classes = dict()
+		self._class_props = dict()
+
+	def visit_BinOp(self, node):
+		left = self.visit(node.left)
+		op = self.visit(node.op)
+		right = self.visit(node.right)
+		if op == '&':
+			return '(__bitops__.band(%s, %s))' %(left, right)
+		elif op == '|':
+			return '(__bitops__.bor(%s, %s))' %(left, right)
+		elif op == '^':
+			return '(__bitops__.bxor(%s, %s))' %(left, right)
+		elif op == '<<':
+			return '(__bitops__.lshift(%s, %s))' %(left, right)
+		elif op == '>>':
+			return '(__bitops__.rshift(%s, %s))' %(left, right)
+		else:
+			return '(%s %s %s)' % (left, op, right)
 
 	def visit_Import(self, node):
 		for alias in node.names:
@@ -192,7 +212,7 @@ class LuaGenerator( pythonjs.JSGenerator ):
 
 	def visit_Return(self, node):
 		if isinstance(node.value, ast.Tuple):
-			return 'return %s;' % ', '.join([self.visit(e) for e in node.value.elts])
+			return 'return __get__(list,"__call__")({}, {pointer={%s}, length=%s});' % (', '.join([self.visit(e) for e in node.value.elts]), len(node.value.elts))
 		if node.value:
 			return 'return %s;' % self.visit(node.value)
 		return 'return nil;'
@@ -221,6 +241,8 @@ class LuaGenerator( pythonjs.JSGenerator ):
 				setter = True
 			elif isinstance(decor, ast.Attribute) and isinstance(decor.value, ast.Name) and decor.attr == 'prototype':
 				klass = self.visit(decor)
+			elif isinstance(decor, ast.Call) and isinstance(decor.func, ast.Name) and decor.func.id == '__typedef__':
+				pass
 			else:
 				raise SyntaxError(decor)
 

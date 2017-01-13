@@ -2,9 +2,10 @@
 # PythonJS to Dart Translator
 # by Brett Hartshorn - copyright 2013
 # License: "New BSD"
-import os, sys
+import sys
 import ast
 import pythonjs
+
 
 class TransformSuperCalls( ast.NodeVisitor ):
 	def __init__(self, node, class_names):
@@ -28,9 +29,21 @@ def collect_names(node):
 
 
 class DartGenerator( pythonjs.JSGenerator ):
-	_classes = dict()
-	_class_props = dict()
-	_raw_dict = False
+
+	def __init__(self, requirejs=False, insert_runtime=False):
+		pythonjs.JSGenerator.__init__(self, requirejs=False, insert_runtime=False)
+		self._classes = dict()
+		self._class_props = dict()
+		self._raw_dict = False
+
+	def visit_With(self, node):
+		s = []
+		for b in node.body:
+			a = self.visit(b)
+			a = a.replace('\\n', '\n')
+			a = a.strip()[1:-2] # strip `"x";` to `x`
+			s.append( a )
+		return '\n'.join(s)
 
 	def _visit_subscript_ellipsis(self, node):
 		name = self.visit(node.value)
@@ -114,7 +127,9 @@ class DartGenerator( pythonjs.JSGenerator ):
 		method_names = set()
 		for b in node.body:
 
-			if isinstance(b, ast.FunctionDef) and len(b.decorator_list):  ##getter/setters
+			if isinstance(b, ast.With):
+				out.append( self.visit(b) )
+			elif isinstance(b, ast.FunctionDef) and len(b.decorator_list):  ##getter/setters
 				for name_node in collect_names( b ):
 					if name_node.id == 'self':
 						name_node.id = 'this'
@@ -167,15 +182,30 @@ class DartGenerator( pythonjs.JSGenerator ):
 				out.append( line )
 
 			elif isinstance(b, ast.FunctionDef) and b.name == node.name:
-				args = [self.visit(a) for a in b.args.args][1:]
-				args = ','.join(args)
+				args, kwargs = self.get_args_kwargs_from_funcdef(b, skip_self=True)
+				kwargs_init = ['%s:%s' %(x.split(':')[0], x.split(':')[0]) for x in kwargs]
+
+				#args = [self.visit(a) for a in b.args.args][1:]
+				#args = ','.join(args)
 				b._prefix = 'static void'
 				b.name = '__init__'
 				out.append( self.visit(b) )
 				if args:
+					args = ','.join(args)
+					if kwargs:
+						out.append(
+							self.indent()+'%s(%s, {%s}) {%s.__init__(this,%s,%s);}'%(node.name, args, ','.join(kwargs), node.name, args, ','.join(kwargs_init))
+						)
+
+					else:
+						out.append(
+							self.indent()+'%s(%s) {%s.__init__(this,%s);}'%(node.name, args, node.name, args)
+						)
+				elif kwargs:
 					out.append(
-						self.indent()+'%s(%s) {%s.__init__(this,%s);}'%(node.name, args, node.name, args)
+						self.indent()+'%s( {%s} ) {%s.__init__(this,%s);}'%(node.name, ','.join(kwargs), node.name, ','.join(kwargs_init))
 					)
+
 				else:
 					out.append(
 						self.indent()+'%s() {%s.__init__(this);}'%(node.name, node.name)
@@ -254,6 +284,25 @@ class DartGenerator( pythonjs.JSGenerator ):
 		out.append('}')
 		return '\n'.join(out)
 
+	def get_args_kwargs_from_funcdef(self, node, skip_self=False):
+		args = []
+		kwargs = []
+		if skip_self: nargs = node.args.args[1:]
+		else: nargs = node.args.args
+
+		offset = len(nargs) - len(node.args.defaults)
+		for i, arg in enumerate(nargs):
+			a = arg.id
+			dindex = i - offset
+			if dindex >= 0 and node.args.defaults:
+				default_value = self.visit( node.args.defaults[dindex] )
+				kwargs.append( '%s:%s' %(a, default_value) )
+			else:
+				args.append( a )
+
+		return args, kwargs
+
+
 	def _visit_for_prep_iter_helper(self, node, out, iter_name):
 		out.append(
 			#self.indent() + 'if (%s is dict) { %s = %s.keys(); }' %(iter_name, iter_name, iter_name)
@@ -306,11 +355,15 @@ class DartGenerator( pythonjs.JSGenerator ):
 	def _visit_function(self, node):
 		getter = False
 		setter = False
+		args_typedefs = {}
 		for decor in node.decorator_list:
 			if isinstance(decor, ast.Name) and decor.id == 'property':
 				getter = True
 			elif isinstance(decor, ast.Attribute) and isinstance(decor.value, ast.Name) and decor.attr == 'setter':
 				setter = True
+			elif isinstance(decor, ast.Call) and isinstance(decor.func, ast.Name) and decor.func.id == '__typedef__':
+				for key in decor.keywords:
+					args_typedefs[ key.arg ] = key.value.id
 			else:
 				raise SyntaxError
 
@@ -321,6 +374,8 @@ class DartGenerator( pythonjs.JSGenerator ):
 		varargs_name = None
 		for i, arg in enumerate(node.args.args):
 			a = arg.id
+			if a in args_typedefs:
+				a = '%s %s' %(args_typedefs[a], a)
 			dindex = i - offset
 			if a.startswith('__variable_args__'):
 				varargs_name = a.split('__')[-1]
@@ -375,6 +430,88 @@ class DartGenerator( pythonjs.JSGenerator ):
 	def visit_NotEq(self, node):
 		return '!='
 
+	def _visit_call_helper(self, node):
+		if node.args:
+			args = [self.visit(e) for e in node.args]
+			args = ', '.join([e for e in args if e])
+		else:
+			args = ''
+
+		if isinstance(node.func, ast.Name) and node.func.id == 'range' and len(node.args)==2:
+			func = '__range2'
+		else:
+			func = self.visit(node.func)
+
+		if node.keywords:
+			kwargs = ','.join( ['%s:%s'%(x.arg, self.visit(x.value)) for x in node.keywords] )
+			if args:
+				return '%s(%s, %s)' %( func, ','.join(args), kwargs )
+			else:
+				return '%s( %s )' %( func, kwargs )
+
+		else:
+			return '%s(%s)' % (func, args)
+
+	def _visit_call_helper_var(self, node):
+		args = [ self.visit(a) for a in node.args ]
+		if self._function_stack:
+			fnode = self._function_stack[-1]
+			rem = []
+			for arg in args:
+				if arg in fnode._local_vars:
+					rem.append( arg )
+				else:
+					fnode._local_vars.add( arg )
+			for arg in rem:
+				args.remove( arg )
+
+		out = []
+
+		if args:
+			out.append( 'var ' + ','.join(args) )
+		if node.keywords:
+			for key in node.keywords:
+				out.append( '%s %s' %(key.value.id, key.arg) )
+
+		return ';'.join(out)
+
+	def _visit_call_helper_list(self, node):
+		name = self.visit(node.func)
+		if node.args:
+			args = [self.visit(e) for e in node.args]
+			args = ', '.join([e for e in args if e])
+		else:
+			args = '[]'  ## the dart list builtin requires an argument
+		return '%s(%s)' % (name, args)
+
+
+	def _visit_call_helper_numpy_array(self, node):
+		simd = {
+			'float32': 'Float32x4'
+		}
+		arg_name = args = None
+		direct = False
+		if isinstance(node.args[0], ast.Name):
+			arg_name = node.args[0].id
+		else:
+			args = ','.join( [self.visit(a) for a in node.args[0].elts] )
+			if len(node.args[0].elts) == 4:  ## simple rule: if there are 4 items, its a direct SIMD type
+				direct = True
+
+		if node.keywords:
+			for key in node.keywords:
+				if key.arg == 'dtype':
+					if isinstance(key.value, ast.Attribute) and key.value.attr in simd:
+						if arg_name:
+							return 'new float32vec( %s )' %arg_name
+						elif direct:
+							return 'new %s(%s)' %(simd[key.value.attr] ,args)
+						else:
+							return 'new float32vec( [%s] )' %args
+		else:
+			raise NotImplementedError('numpy.array requires dtype is given')
+
+
 	def _visit_call_helper_instanceof(self, node):
 		args = map(self.visit, node.args)
 		if len(args) == 2:
@@ -387,6 +524,48 @@ class DartGenerator( pythonjs.JSGenerator ):
 	def visit_ExceptHandler(self, node):
 		return '\n'.join( [self.visit(n) for n in node.body] )
 
+	def visit_Compare(self, node):
+		specials = {
+			'<' : '__lt__',
+			'>' : '__gt__', 
+			'<=' : '__lte__', 
+			'>=' : '__gte__'
+		}
+		comp = []
+		if len(node.ops) == 0:
+
+			comp.append('(')
+			comp.append( self.visit(node.left) )
+			comp.append( ')' )
+
+		else:
+			if self.visit(node.ops[0]) in specials:
+				pass
+			else:
+				comp.append('(')
+				comp.append( self.visit(node.left) )
+				comp.append( ')' )
+
+			for i in range( len(node.ops) ):
+				op = self.visit(node.ops[i])
+
+				if op in specials:
+					comp.append( specials[op] + '(%s,' %self.visit(node.left) )
+				else:
+					comp.append( op )
+
+				if isinstance(node.comparators[i], ast.BinOp):
+					comp.append('(')
+					comp.append( self.visit(node.comparators[i]) )
+					comp.append(')')
+				else:
+					comp.append( self.visit(node.comparators[i]) )
+
+				if op in specials:
+					comp.append( ')' )
+
+
+		return ' '.join( comp )
 
 def main(script):
 	tree = ast.parse(script)
